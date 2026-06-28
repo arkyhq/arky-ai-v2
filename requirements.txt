@@ -1,0 +1,13 @@
+requests
+beautifulsoup4
+praw
+pytrends
+python-dotenv
+groq
+moviepy
+edge-tts
+openai
+pillow
+opencv-python
+ffmpeg-python
+tqdm
