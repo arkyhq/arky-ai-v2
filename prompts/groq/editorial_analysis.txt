@@ -20,5 +20,8 @@ Return JSON only with exactly these fields:
 
 Do not use markdown, code fences, commentary, or explanations.
 Do not invent facts beyond the provided trend fields.
+Base every value only on the words present in the trend payload.
+Do not use outside knowledge about real people, events, shows, or news.
+If conflict, entities, or context are not explicit in the payload, use "unknown" or an empty array.
 If the trend is too vague, use "unknown", empty arrays, and low confidence.
 Use concise values.
