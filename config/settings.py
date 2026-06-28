@@ -11,7 +11,17 @@ runtime settings
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - optional environment dependency
+    load_dotenv = None
+
+
+if load_dotenv is not None:
+    load_dotenv()
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +31,15 @@ GOOGLE_TRENDS_CACHE_FILE = CACHE_DIR / "google_trends.json"
 GOOGLE_TRENDS_CACHE_TTL_SECONDS = 60 * 60 * 6
 
 OUTPUT_TRENDS_PATH = PROJECT_ROOT / "outputs" / "trends.json"
+OUTPUT_EDITORIAL_TRENDS_PATH = PROJECT_ROOT / "outputs" / "editorial_trends.json"
+EDITORIAL_ANALYSIS_PROMPT_PATH = PROJECT_ROOT / "prompts" / "groq" / "editorial_analysis.txt"
+
+SCRIPT_PROVIDER = os.getenv("SCRIPT_PROVIDER", "groq")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_REQUEST_TIMEOUT = 30
+GROQ_MAX_RETRIES = 3
+GROQ_RETRY_DELAY_SECONDS = 2
 
 REDDIT_SUBREDDITS = [
     "Fauxmoi",
