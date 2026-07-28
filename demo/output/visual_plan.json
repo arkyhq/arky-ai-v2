@@ -1,0 +1,59 @@
+{
+    "trend_id": "script_blueprint_simple_news_now_streaming_movies_in_theaters",
+    "success": true,
+    "visual_plan": [
+        {
+            "scene_id": 1,
+            "start_time": 0.0,
+            "end_time": 2.5,
+            "narration_segment": "Movies are streaming in theaters now.",
+            "shot_type": "establishing_shot",
+            "camera_movement": "static",
+            "visual_focus": "movies in theaters",
+            "asset_requirement": "licensed_image",
+            "transition_type": "cut"
+        },
+        {
+            "scene_id": 2,
+            "start_time": 2.5,
+            "end_time": 5.0,
+            "narration_segment": "People want convenience and accessibility.",
+            "shot_type": "medium_shot",
+            "camera_movement": "slow_push_in",
+            "visual_focus": "people using devices",
+            "asset_requirement": "brand_safe_b_roll",
+            "transition_type": "soft_cut"
+        },
+        {
+            "scene_id": 3,
+            "start_time": 5.0,
+            "end_time": 7.0,
+            "narration_segment": "The topic is about movies and theaters.",
+            "shot_type": "wide_shot",
+            "camera_movement": "pan_left",
+            "visual_focus": "theater and movie posters",
+            "asset_requirement": "public_domain_media",
+            "transition_type": "fade"
+        }
+    ],
+    "validation": {
+        "input": {
+            "valid": true,
+            "error_count": 0,
+            "warning_count": 0,
+            "errors": [],
+            "warnings": [],
+            "validated_at_stage": "visual_validator"
+        },
+        "output": {
+            "valid": true,
+            "error_count": 0,
+            "warning_count": 0,
+            "errors": [],
+            "warnings": [],
+            "validated_at_stage": "visual_output_validator"
+        }
+    },
+    "fallback_used": false,
+    "generation_source": "groq"
+}

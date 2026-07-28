@@ -1,0 +1,12 @@
+{
+    "trend_id": "script_blueprint_simple_news_now_streaming_movies_in_theaters",
+    "voice_script": "Movies are streaming in theaters now. People want convenience and accessibility. The topic is about movies and theaters.",
+    "metadata": {
+        "blueprint_confidence": 0.68,
+        "strategy_archetype": "simple_news",
+        "blueprint_fallback_used": false,
+        "source_narration": "Movies are now streaming in theaters. People are interested in convenience and accessibility of movies. The named topic includes movies and theaters."
+    },
+    "generation_source": "groq",
+    "fallback_used": false
+}

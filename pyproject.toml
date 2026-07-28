@@ -1,0 +1,14 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [
+    ".git",
+    "__pycache__",
+    "data",
+    "logs",
+    "outputs",
+    "demo/output",
+]
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
