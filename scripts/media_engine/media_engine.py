@@ -103,65 +103,36 @@ class MediaEngine:
 
             routed = self._router.route(media_request)
             if routed.get("success") is not True:
-                return self._ai_provider_router.route(media_request)
+                return self._process_ai_fallback(media_request)
 
             candidates = _provider_candidates(routed)
             if not candidates:
-                return self._ai_provider_router.route(media_request)
+                return self._process_ai_fallback(media_request)
 
             scoring = self._asset_scorer.score_candidates(candidates)
             if scoring.get("success") is not True:
-                return self._ai_provider_router.route(media_request)
+                return self._process_ai_fallback(media_request)
 
             best_asset = _safe_mapping(scoring.get("best_asset"))
             if not best_asset:
-                return self._ai_provider_router.route(media_request)
+                return self._process_ai_fallback(media_request)
 
             best_score = _best_score(scoring)
             if best_score < STOCK_SCORE_THRESHOLD:
-                return self._ai_provider_router.route(media_request)
-
-            downloaded = self._download_manager.download_asset(best_asset)
-            if downloaded.get("success") is not True:
-                return _pipeline_result(
-                    success=False,
-                    status="download_failed",
-                    asset=best_asset,
-                    errors=downloaded.get("errors"),
+                return self._process_ai_fallback(
+                    media_request,
                     warnings=(
                         *_as_tuple(routed.get("warnings")),
                         *_as_tuple(scoring.get("warnings")),
-                        *_as_tuple(downloaded.get("warnings")),
                     ),
                 )
 
-            downloaded_asset = _downloaded_asset_record(
+            return self._download_and_register(
                 media_request,
                 best_asset,
-                downloaded,
-            )
-            registration = self._asset_library.register_downloaded_asset(
-                downloaded_asset
-            )
-            if registration.get("success") is not True:
-                return _pipeline_result(
-                    success=False,
-                    status="registration_failed",
-                    asset=registration.get("asset"),
-                    errors=registration.get("errors"),
-                    warnings=registration.get("warnings"),
-                )
-
-            return _pipeline_result(
-                success=True,
-                status="success",
-                asset=registration.get("asset"),
-                errors=(),
                 warnings=(
                     *_as_tuple(routed.get("warnings")),
                     *_as_tuple(scoring.get("warnings")),
-                    *_as_tuple(downloaded.get("warnings")),
-                    *_as_tuple(registration.get("warnings")),
                 ),
             )
         except Exception as exc:
@@ -172,6 +143,107 @@ class MediaEngine:
                 errors=(f"unexpected media engine error: {exc}",),
                 warnings=(),
             )
+
+    def _process_ai_fallback(
+        self,
+        media_request: dict[str, Any],
+        warnings: Any = (),
+    ) -> dict[str, Any]:
+        """
+        Route a media request through AI fallback and acquire the result.
+
+        Arguments:
+            media_request: normalized media request.
+            warnings: upstream warnings to preserve.
+
+        Returns:
+            Structured pipeline result or AI router failure response.
+        """
+        ai_response = self._ai_provider_router.route(media_request)
+        if ai_response.get("success") is not True:
+            return ai_response
+
+        ai_candidates = _provider_candidates(ai_response)
+        ai_asset = ai_candidates[0] if ai_candidates else {}
+        if not ai_asset:
+            return _pipeline_result(
+                success=False,
+                status="ai_provider_empty",
+                asset={},
+                errors=("AI provider returned no asset",),
+                warnings=(
+                    *_as_tuple(warnings),
+                    *_as_tuple(ai_response.get("warnings")),
+                ),
+            )
+
+        return self._download_and_register(
+            media_request,
+            ai_asset,
+            warnings=(
+                *_as_tuple(warnings),
+                *_as_tuple(ai_response.get("warnings")),
+            ),
+        )
+
+    def _download_and_register(
+        self,
+        media_request: dict[str, Any],
+        asset: dict[str, Any],
+        warnings: Any = (),
+    ) -> dict[str, Any]:
+        """
+        Download one selected asset and register it in the asset library.
+
+        Arguments:
+            media_request: normalized media request.
+            asset: selected normalized provider asset.
+            warnings: upstream warnings to preserve.
+
+        Returns:
+            Structured pipeline result.
+        """
+        downloaded = self._download_manager.download_asset(asset)
+        if downloaded.get("success") is not True:
+            return _pipeline_result(
+                success=False,
+                status="download_failed",
+                asset=asset,
+                errors=downloaded.get("errors"),
+                warnings=(
+                    *_as_tuple(warnings),
+                    *_as_tuple(downloaded.get("warnings")),
+                ),
+            )
+
+        downloaded_asset = _downloaded_asset_record(
+            media_request,
+            asset,
+            downloaded,
+        )
+        registration = self._asset_library.register_downloaded_asset(
+            downloaded_asset
+        )
+        if registration.get("success") is not True:
+            return _pipeline_result(
+                success=False,
+                status="registration_failed",
+                asset=registration.get("asset"),
+                errors=registration.get("errors"),
+                warnings=registration.get("warnings"),
+            )
+
+        return _pipeline_result(
+            success=True,
+            status="success",
+            asset=registration.get("asset"),
+            errors=(),
+            warnings=(
+                *_as_tuple(warnings),
+                *_as_tuple(downloaded.get("warnings")),
+                *_as_tuple(registration.get("warnings")),
+            ),
+        )
 
     def process_batch(
         self,
