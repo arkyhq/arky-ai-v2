@@ -12,17 +12,24 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 try:
+    from ai_provider_router import AIProviderRouter
+    from asset_scorer import AssetScorer
     from asset_library import AssetLibrary
     from download.download_manager import DownloadManager
     from media_mapper import map_media_request
     from media_validator import validate_media_request
     from provider_router import ProviderRouter
 except ModuleNotFoundError:
+    from scripts.media_engine.ai_provider_router import AIProviderRouter
+    from scripts.media_engine.asset_scorer import AssetScorer
     from scripts.media_engine.asset_library import AssetLibrary
     from scripts.media_engine.download.download_manager import DownloadManager
     from scripts.media_engine.media_mapper import map_media_request
     from scripts.media_engine.media_validator import validate_media_request
     from scripts.media_engine.provider_router import ProviderRouter
+
+
+STOCK_SCORE_THRESHOLD = 80
 
 
 class MediaEngine:
@@ -38,6 +45,8 @@ class MediaEngine:
         router: ProviderRouter | None = None,
         asset_library: AssetLibrary | None = None,
         download_manager: DownloadManager | None = None,
+        asset_scorer: AssetScorer | None = None,
+        ai_provider_router: AIProviderRouter | None = None,
     ) -> None:
         """Initialize Media Engine with injectable pipeline dependencies."""
         self._router = router if router is not None else ProviderRouter()
@@ -48,6 +57,14 @@ class MediaEngine:
             download_manager
             if download_manager is not None
             else DownloadManager()
+        )
+        self._asset_scorer = (
+            asset_scorer if asset_scorer is not None else AssetScorer()
+        )
+        self._ai_provider_router = (
+            ai_provider_router
+            if ai_provider_router is not None
+            else AIProviderRouter()
         )
 
     def process_request(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -86,40 +103,41 @@ class MediaEngine:
 
             routed = self._router.route(media_request)
             if routed.get("success") is not True:
-                return _pipeline_result(
-                    success=False,
-                    status="routing_failed",
-                    asset={},
-                    errors=routed.get("errors"),
-                    warnings=routed.get("warnings"),
-                )
+                return self._ai_provider_router.route(media_request)
 
-            provider_asset = _first_provider_asset(routed)
-            if not provider_asset:
-                return _pipeline_result(
-                    success=False,
-                    status="provider_empty",
-                    asset={},
-                    errors=("provider returned no assets",),
-                    warnings=routed.get("warnings"),
-                )
+            candidates = _provider_candidates(routed)
+            if not candidates:
+                return self._ai_provider_router.route(media_request)
 
-            downloaded = self._download_manager.download_asset(provider_asset)
+            scoring = self._asset_scorer.score_candidates(candidates)
+            if scoring.get("success") is not True:
+                return self._ai_provider_router.route(media_request)
+
+            best_asset = _safe_mapping(scoring.get("best_asset"))
+            if not best_asset:
+                return self._ai_provider_router.route(media_request)
+
+            best_score = _best_score(scoring)
+            if best_score < STOCK_SCORE_THRESHOLD:
+                return self._ai_provider_router.route(media_request)
+
+            downloaded = self._download_manager.download_asset(best_asset)
             if downloaded.get("success") is not True:
                 return _pipeline_result(
                     success=False,
                     status="download_failed",
-                    asset=provider_asset,
+                    asset=best_asset,
                     errors=downloaded.get("errors"),
                     warnings=(
                         *_as_tuple(routed.get("warnings")),
+                        *_as_tuple(scoring.get("warnings")),
                         *_as_tuple(downloaded.get("warnings")),
                     ),
                 )
 
             downloaded_asset = _downloaded_asset_record(
                 media_request,
-                provider_asset,
+                best_asset,
                 downloaded,
             )
             registration = self._asset_library.register_downloaded_asset(
@@ -141,6 +159,7 @@ class MediaEngine:
                 errors=(),
                 warnings=(
                     *_as_tuple(routed.get("warnings")),
+                    *_as_tuple(scoring.get("warnings")),
                     *_as_tuple(downloaded.get("warnings")),
                     *_as_tuple(registration.get("warnings")),
                 ),
@@ -181,14 +200,40 @@ class MediaEngine:
             )
 
 
-def _first_provider_asset(routed: dict[str, Any]) -> dict[str, Any]:
-    """Return the first normalized provider asset from a routing result."""
+def _provider_candidates(routed: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return normalized provider candidates from a routing result."""
+    candidates = routed.get("candidates")
+    if isinstance(candidates, (list, tuple)):
+        return [
+            _safe_mapping(candidate)
+            for candidate in candidates
+            if isinstance(candidate, dict)
+        ]
+
     results = routed.get("results")
-    if isinstance(results, list) and results:
-        return _safe_mapping(results[0])
-    if isinstance(results, tuple) and results:
-        return _safe_mapping(results[0])
-    return _safe_mapping(routed.get("asset"))
+    if isinstance(results, (list, tuple)):
+        return [
+            _safe_mapping(result)
+            for result in results
+            if isinstance(result, dict)
+        ]
+
+    asset = _safe_mapping(routed.get("asset"))
+    return [asset] if asset else []
+
+
+def _best_score(scoring: dict[str, Any]) -> int:
+    """Return the highest candidate score from a scorer response."""
+    scored_candidates = scoring.get("candidates")
+    if not isinstance(scored_candidates, (list, tuple)):
+        return 0
+
+    scores = [
+        _safe_int(candidate.get("score"))
+        for candidate in scored_candidates
+        if isinstance(candidate, dict)
+    ]
+    return max(scores, default=0)
 
 
 def _downloaded_asset_record(
@@ -289,6 +334,14 @@ def _safe_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _safe_int(value: Any) -> int:
+    """Return integer value when possible."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _as_tuple(value: Any) -> tuple[Any, ...]:
     """Return value as a tuple for result normalization."""
     if value is None:
@@ -321,33 +374,41 @@ def _self_test() -> bool:
             """Return mock provider priority."""
             return 1
 
-        def acquire(self, request: dict[str, Any]) -> dict[str, Any]:
-            """Return deterministic mock provider acquisition result."""
+        def provider_type(self) -> str:
+            """Return mock provider type."""
+            return "stock"
+
+        def search(self, request: dict[str, Any]) -> dict[str, Any]:
+            """Return deterministic mock provider search result."""
             if not self._should_succeed:
                 return {
                     "success": False,
-                    "asset": {},
+                    "provider": "Pexels",
+                    "results": [],
                     "errors": ["mock route failure"],
                     "warnings": [],
                 }
 
             return {
                 "success": True,
-                "asset": {
-                    "asset_id": "provider_asset_001",
-                    "asset_type": request["asset_type"],
-                    "download_url": "https://example.com/asset.jpg",
-                    "height": 1080,
-                    "license": "mock",
-                    "photographer": "mock",
-                    "provider": "Pexels",
-                    "provider_type": "stock",
-                    "width": 1920,
-                    "confidence": 92,
-                    "local_path": "",
-                    "status": "available",
-                    "metadata": {},
-                },
+                "provider": "Pexels",
+                "results": [
+                    {
+                        "asset_id": "provider_asset_001",
+                        "asset_type": request["asset_type"],
+                        "download_url": "https://example.com/asset.jpg",
+                        "height": 1080,
+                        "license": "mock",
+                        "photographer": "mock",
+                        "provider": "Pexels",
+                        "provider_type": "stock",
+                        "width": 1920,
+                        "confidence": 92,
+                        "local_path": "",
+                        "status": "available",
+                        "metadata": {},
+                    }
+                ],
                 "errors": [],
                 "warnings": [],
             }
