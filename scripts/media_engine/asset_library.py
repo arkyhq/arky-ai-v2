@@ -30,6 +30,34 @@ ASSET_FIELDS = (
 
 LOOKUP_FIELDS = frozenset({"asset_id", "hash", "asset_type", "provider"})
 
+DOWNLOADED_ASSET_FIELDS = (
+    "asset_id",
+    "provider",
+    "provider_asset_id",
+    "local_path",
+    "download_url",
+    "sha256",
+    "width",
+    "height",
+    "license",
+    "asset_type",
+    "created_at",
+    "last_used",
+    "tags",
+)
+
+REQUIRED_DOWNLOADED_ASSET_FIELDS = (
+    "asset_id",
+    "provider",
+    "local_path",
+    "download_url",
+    "sha256",
+    "width",
+    "height",
+    "license",
+    "asset_type",
+)
+
 
 class AssetLibrary:
     """
@@ -136,6 +164,60 @@ class AssetLibrary:
             errors.append(f"unexpected update error: {exc}")
             return _result(False, {}, errors, warnings)
 
+    def register_downloaded_asset(self, asset: dict[str, Any]) -> dict[str, Any]:
+        """
+        Register downloaded asset metadata in the asset library cache.
+
+        Arguments:
+            asset: downloaded asset metadata dictionary.
+
+        Returns:
+            Structured registration result.
+        """
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        try:
+            source = _safe_mapping(asset)
+            missing_fields = _missing_downloaded_asset_fields(source)
+            if missing_fields:
+                errors.append(
+                    "missing downloaded asset fields: "
+                    + ", ".join(missing_fields)
+                )
+                return _result(False, {}, errors, warnings)
+
+            existing = self.asset_exists(source)
+            if existing.get("exists") is True:
+                errors.append("downloaded asset already exists")
+                return _result(False, existing.get("asset", {}), errors, warnings)
+
+            timestamp = _timestamp()
+            record = {
+                field: source.get(field, "")
+                for field in DOWNLOADED_ASSET_FIELDS
+            }
+            record["provider_asset_id"] = _safe_text(
+                source.get("provider_asset_id")
+            )
+            record["created_at"] = (
+                _safe_text(source.get("created_at")) or timestamp
+            )
+            record["last_used"] = _safe_text(source.get("last_used")) or timestamp
+            record["tags"] = _safe_tags(source.get("tags"))
+            record["hash"] = _safe_text(source.get("sha256"))
+            record["status"] = source.get("status", "downloaded")
+            record["metadata"] = _safe_mapping(source.get("metadata"))
+
+            registered = self.register_asset(record)
+            if not registered.get("success"):
+                return registered
+
+            return _result(True, registered.get("asset", {}), errors, warnings)
+        except Exception as exc:
+            errors.append(f"unexpected register downloaded asset error: {exc}")
+            return _result(False, {}, errors, warnings)
+
     def get_asset(self, asset_id: str) -> dict[str, Any]:
         """
         Return one asset by asset_id.
@@ -197,19 +279,67 @@ class AssetLibrary:
             errors.append(f"unexpected find error: {exc}")
             return _result(False, {}, errors, warnings, ())
 
-    def asset_exists(self, asset_id: str) -> dict[str, Any]:
+    def find_by_sha256(self, sha256: str) -> dict[str, Any]:
         """
-        Return whether an asset exists by asset_id.
+        Find one asset by SHA256 hash.
 
         Arguments:
-            asset_id: asset identifier.
+            sha256: downloaded asset SHA256 hash.
+
+        Returns:
+            Structured lookup result.
+        """
+        return self._find_by_download_field("sha256", sha256)
+
+    def find_by_download_url(self, url: str) -> dict[str, Any]:
+        """
+        Find one asset by original download URL.
+
+        Arguments:
+            url: remote media download URL.
+
+        Returns:
+            Structured lookup result.
+        """
+        return self._find_by_download_field("download_url", url)
+
+    def find_by_local_path(self, path: str) -> dict[str, Any]:
+        """
+        Find one asset by local filesystem path.
+
+        Arguments:
+            path: local downloaded asset path.
+
+        Returns:
+            Structured lookup result.
+        """
+        return self._find_by_download_field("local_path", path)
+
+    def asset_exists(self, asset: Any) -> dict[str, Any]:
+        """
+        Return whether an asset exists by id or downloaded asset identity.
+
+        Arguments:
+            asset: asset identifier or downloaded asset metadata dictionary.
 
         Returns:
             Structured existence result.
         """
         errors: list[str] = []
         warnings: list[str] = []
-        clean_asset_id = _safe_text(asset_id)
+
+        if isinstance(asset, dict):
+            match = self._find_existing_downloaded_asset(asset)
+            exists = bool(match)
+            return {
+                "success": True,
+                "exists": exists,
+                "asset": match,
+                "errors": tuple(errors),
+                "warnings": tuple(warnings),
+            }
+
+        clean_asset_id = _safe_text(asset)
         exists = clean_asset_id in self._assets
         return {
             "success": True,
@@ -251,6 +381,56 @@ class AssetLibrary:
                 return dict(asset)
         return {}
 
+    def _find_by_download_field(
+        self,
+        field: str,
+        value: Any,
+    ) -> dict[str, Any]:
+        """Return first asset matching a downloaded asset field."""
+        errors: list[str] = []
+        warnings: list[str] = []
+        clean_value = _safe_text(value)
+
+        try:
+            for asset in self._assets.values():
+                if _safe_text(asset.get(field)) == clean_value:
+                    return _result(True, asset, errors, warnings)
+                if field == "sha256" and (
+                    _safe_text(asset.get("hash")) == clean_value
+                ):
+                    return _result(True, asset, errors, warnings)
+
+            errors.append(f"asset not found by {field}: {clean_value}")
+            return _result(False, {}, errors, warnings)
+        except Exception as exc:
+            errors.append(f"unexpected find by {field} error: {exc}")
+            return _result(False, {}, errors, warnings)
+
+    def _find_existing_downloaded_asset(
+        self,
+        asset: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return an existing downloaded asset matching cache identity."""
+        sha256 = _safe_text(asset.get("sha256"))
+        download_url = _safe_text(asset.get("download_url"))
+        local_path = _safe_text(asset.get("local_path"))
+
+        for existing_asset in self._assets.values():
+            existing_sha256 = _safe_text(existing_asset.get("sha256"))
+            existing_hash = _safe_text(existing_asset.get("hash"))
+            if sha256 and sha256 in {existing_sha256, existing_hash}:
+                return dict(existing_asset)
+            if download_url and (
+                _safe_text(existing_asset.get("download_url")) == download_url
+            ):
+                return dict(existing_asset)
+            if local_path and (
+                _safe_text(existing_asset.get("local_path")) == local_path
+            ):
+                return dict(existing_asset)
+
+        return {}
+
 
 def _normalize_asset(asset: dict[str, Any]) -> dict[str, Any]:
     """Return a normalized shallow asset metadata record."""
@@ -289,6 +469,24 @@ def _safe_mapping(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
     return {}
+
+
+def _missing_downloaded_asset_fields(asset: dict[str, Any]) -> tuple[str, ...]:
+    """Return required downloaded asset fields that are not populated."""
+    return tuple(
+        field
+        for field in REQUIRED_DOWNLOADED_ASSET_FIELDS
+        if _safe_text(asset.get(field)) == ""
+    )
+
+
+def _safe_tags(value: Any) -> list[Any]:
+    """Return tags as a new list."""
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, tuple):
+        return list(value)
+    return []
 
 
 def _safe_text(value: Any) -> str:

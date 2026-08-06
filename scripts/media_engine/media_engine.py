@@ -2,24 +2,25 @@
 Media Engine orchestration for the ARKY Media Acquisition pipeline.
 
 This module coordinates public module APIs only. It performs no provider logic,
-validation logic, AI work, downloading, networking, filesystem operations,
+validation logic, AI work, direct networking, direct filesystem operations,
 asset searching, prompt generation, or routing decisions.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 try:
     from asset_library import AssetLibrary
+    from download.download_manager import DownloadManager
     from media_mapper import map_media_request
-    from media_output_validator import validate_media_output
     from media_validator import validate_media_request
     from provider_router import ProviderRouter
 except ModuleNotFoundError:
     from scripts.media_engine.asset_library import AssetLibrary
+    from scripts.media_engine.download.download_manager import DownloadManager
     from scripts.media_engine.media_mapper import map_media_request
-    from scripts.media_engine.media_output_validator import validate_media_output
     from scripts.media_engine.media_validator import validate_media_request
     from scripts.media_engine.provider_router import ProviderRouter
 
@@ -36,11 +37,17 @@ class MediaEngine:
         self,
         router: ProviderRouter | None = None,
         asset_library: AssetLibrary | None = None,
+        download_manager: DownloadManager | None = None,
     ) -> None:
-        """Initialize Media Engine with injectable router and asset library."""
+        """Initialize Media Engine with injectable pipeline dependencies."""
         self._router = router if router is not None else ProviderRouter()
         self._asset_library = (
             asset_library if asset_library is not None else AssetLibrary()
+        )
+        self._download_manager = (
+            download_manager
+            if download_manager is not None
+            else DownloadManager()
         )
 
     def process_request(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -65,6 +72,18 @@ class MediaEngine:
                     warnings=request_validation.get("warnings"),
                 )
 
+            cached = self._asset_library.asset_exists(
+                media_request.get("asset_id", "")
+            )
+            if cached.get("success") is True and cached.get("exists") is True:
+                return _pipeline_result(
+                    success=True,
+                    status="cache_hit",
+                    asset=cached.get("asset"),
+                    errors=cached.get("errors"),
+                    warnings=cached.get("warnings"),
+                )
+
             routed = self._router.route(media_request)
             if routed.get("success") is not True:
                 return _pipeline_result(
@@ -75,19 +94,36 @@ class MediaEngine:
                     warnings=routed.get("warnings"),
                 )
 
-            acquisition_output = _acquisition_output(routed)
-            output_validation = validate_media_output(acquisition_output)
-            if not output_validation.get("valid"):
+            provider_asset = _first_provider_asset(routed)
+            if not provider_asset:
                 return _pipeline_result(
                     success=False,
-                    status="output_validation_failed",
-                    asset=acquisition_output.get("asset"),
-                    errors=output_validation.get("errors"),
-                    warnings=output_validation.get("warnings"),
+                    status="provider_empty",
+                    asset={},
+                    errors=("provider returned no assets",),
+                    warnings=routed.get("warnings"),
                 )
 
-            registration = self._asset_library.register_asset(
-                acquisition_output["asset"]
+            downloaded = self._download_manager.download_asset(provider_asset)
+            if downloaded.get("success") is not True:
+                return _pipeline_result(
+                    success=False,
+                    status="download_failed",
+                    asset=provider_asset,
+                    errors=downloaded.get("errors"),
+                    warnings=(
+                        *_as_tuple(routed.get("warnings")),
+                        *_as_tuple(downloaded.get("warnings")),
+                    ),
+                )
+
+            downloaded_asset = _downloaded_asset_record(
+                media_request,
+                provider_asset,
+                downloaded,
+            )
+            registration = self._asset_library.register_downloaded_asset(
+                downloaded_asset
             )
             if registration.get("success") is not True:
                 return _pipeline_result(
@@ -105,7 +141,7 @@ class MediaEngine:
                 errors=(),
                 warnings=(
                     *_as_tuple(routed.get("warnings")),
-                    *_as_tuple(output_validation.get("warnings")),
+                    *_as_tuple(downloaded.get("warnings")),
                     *_as_tuple(registration.get("warnings")),
                 ),
             )
@@ -145,8 +181,65 @@ class MediaEngine:
             )
 
 
+def _first_provider_asset(routed: dict[str, Any]) -> dict[str, Any]:
+    """Return the first normalized provider asset from a routing result."""
+    results = routed.get("results")
+    if isinstance(results, list) and results:
+        return _safe_mapping(results[0])
+    if isinstance(results, tuple) and results:
+        return _safe_mapping(results[0])
+    return _safe_mapping(routed.get("asset"))
+
+
+def _downloaded_asset_record(
+    media_request: dict[str, Any],
+    provider_asset: dict[str, Any],
+    downloaded: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge request, provider, and download metadata for cache storage."""
+    timestamp = _timestamp()
+    provider_asset_id = _safe_text(provider_asset.get("asset_id"))
+    metadata = _safe_mapping(media_request.get("metadata"))
+
+    return {
+        **provider_asset,
+        **downloaded,
+        "asset_id": _safe_text(media_request.get("asset_id"))
+        or provider_asset_id,
+        "provider": _safe_text(provider_asset.get("provider"))
+        or _safe_text(downloaded.get("provider")),
+        "provider_asset_id": _safe_text(
+            provider_asset.get("provider_asset_id")
+        )
+        or provider_asset_id,
+        "asset_type": _safe_text(media_request.get("asset_type"))
+        or _safe_text(provider_asset.get("asset_type")),
+        "download_url": _safe_text(provider_asset.get("download_url")),
+        "local_path": _safe_text(downloaded.get("local_path")),
+        "sha256": _safe_text(downloaded.get("sha256")),
+        "width": provider_asset.get("width", ""),
+        "height": provider_asset.get("height", ""),
+        "license": provider_asset.get("license", ""),
+        "created_at": timestamp,
+        "last_used": timestamp,
+        "tags": _safe_tags(metadata.get("tags")),
+    }
+
+
+def _timestamp() -> str:
+    """Return an ISO-like UTC timestamp for downloaded asset metadata."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _safe_tags(value: Any) -> list[str]:
+    """Return clean tag strings as a list."""
+    if not isinstance(value, (tuple, list)):
+        return []
+    return list(filter(None, (_safe_text(item) for item in value)))
+
+
 def _acquisition_output(routed: dict[str, Any]) -> dict[str, Any]:
-    """Build the output package for public output validation."""
+    """Build the output package for legacy callers that import this helper."""
     asset = _safe_mapping(routed.get("asset"))
     provider = _safe_text(routed.get("provider"))
     provider_type = _safe_text(routed.get("provider_type")) or _safe_text(
@@ -241,15 +334,35 @@ def _self_test() -> bool:
             return {
                 "success": True,
                 "asset": {
-                    "asset_id": request["asset_id"],
+                    "asset_id": "provider_asset_001",
                     "asset_type": request["asset_type"],
+                    "download_url": "https://example.com/asset.jpg",
+                    "height": 1080,
+                    "license": "mock",
+                    "photographer": "mock",
                     "provider": "Pexels",
                     "provider_type": "stock",
+                    "width": 1920,
                     "confidence": 92,
                     "local_path": "",
                     "status": "available",
                     "metadata": {},
                 },
+                "errors": [],
+                "warnings": [],
+            }
+
+    class MockDownloadManager:
+        """Small download manager implementation for self-test."""
+
+        def download_asset(self, asset: dict[str, Any]) -> dict[str, Any]:
+            """Return deterministic mock download metadata."""
+            return {
+                "success": True,
+                "local_path": "assets/library/pexels_provider_asset_001.jpg",
+                "sha256": "sha256_001",
+                "provider": asset.get("provider", ""),
+                "asset_id": asset.get("asset_id", ""),
                 "errors": [],
                 "warnings": [],
             }
@@ -260,8 +373,14 @@ def _self_test() -> bool:
         "asset_type": "background",
         "description": "futuristic studio",
     }
-    successful_engine = MediaEngine(ProviderRouter([MockProvider()]))
-    failing_engine = MediaEngine(ProviderRouter([MockProvider(False)]))
+    successful_engine = MediaEngine(
+        ProviderRouter([MockProvider()]),
+        download_manager=MockDownloadManager(),
+    )
+    failing_engine = MediaEngine(
+        ProviderRouter([MockProvider(False)]),
+        download_manager=MockDownloadManager(),
+    )
 
     successful = successful_engine.process_request(request)
     failed_validation = successful_engine.process_request({"asset_type": "unknown"})
